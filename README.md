@@ -4,9 +4,9 @@ Default roles is:
 "Reader",
 "Storage Account Key Operator Service Role"
 
-# Steps 1. Install AzureRM PowerShell 5.0.0.
+# Steps 1. Install AzureRM PowerShell 5.0.0 or latter.
 Ref Guide:
-https://docs.microsoft.com/en-us/powershell/azure/install-azurerm-ps?view=azurermps-5.0.0
+https://docs.microsoft.com/en-us/powershell/azure/install-azurerm-ps
 
 Install the Azure Resource Manager modules from the PowerShell Gallery
 ```ps
