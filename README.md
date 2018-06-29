@@ -30,14 +30,19 @@ Import-Module AzureRM
 Get-Module AzureRM -list | Select-Object Name,Version,Path
 ```
 
-# Step 4. Download the script AzureAgentAssignRole.ps1 , and run following command in the PowerShell console.
+# Steps 4. Sign in with your Azure credentials
+```ps
+Login-AzureRmAccount
+```
+
+# Step 5. Download the script AzureAgentAssignRole.ps1 , and run following command in the PowerShell console.
 ```ps
 .\AzureAgentAssignRole.ps1 -AppId "xxx-xxx-xxx-xx" -Mode Full -ProductionRun $false -Login $true -YesToAll $true -Log $true
 ```
 Note: Appid is Application ID under Azure Portal(portal.azure.com):
 Azure Active Directory -> App registrations -> Select One of the APP.
 
-# Step 5. Change the ProductionRun to $true to do changes.
+# Step 6. Change the ProductionRun to $true to do changes.
 ```ps
 .\AzureAgentAssignRole.ps1 -AppId "xxx-xxx-xxx-xx" -Mode Full -ProductionRun $true -Login $true -YesToAll $true -Log $true
 ```
