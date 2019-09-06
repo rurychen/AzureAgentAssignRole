@@ -2,16 +2,25 @@
 .SYNOPSIS
     .
 .DESCRIPTION
-    .
-.PARAMETER Mode
-    Please select a scanning mode, which can be either Full.
+    .This AzureRM Script is used to Assign Role for App.
+    
+.PARAMETER AppId
+    The App ID. 
     
 .PARAMETER ProductionRun
     Default is $false, nothing will be changed. 
     Set to $True, will do assgin role.
+ 
+.PARAMETER cleanup
+    Default is $false, it means it will assign the role to App. 
+    Set to $True, it will clean up the role form the App.
+    
     
 .PARAMETER YesToAll
     Set to $true will skip all Confirm Box.
+
+.PARAMETER Mode
+    Please select a scanning mode, which can be either Full.
     
  .PARAMETER Login
     Default is $false, open a login box to Azure. Change to $Ture, will use the current Login session.
@@ -23,11 +32,14 @@
    This script cloud copy and run in the Azure Cloud Shell. Please change the Appid before run the script.
 .NOTES
     Author:Rury Chen rurychen@gmail.com
-    Date: 2018-6-28
+    Create Date: 2018-6-28
+    Last update: 2019-9-6
 #>
 
+
+$AppId = "XXX-XXX-XXX-XX-XXX"
 $ProductionRun = $true
-$AppId = ""
+$cleanup = $false
 
 
 
@@ -36,8 +48,18 @@ $Login = $true
 $YesToAll = $true
 $Log = $false
 
-
 Write-Host ""
+if ([string]::IsNullOrEmpty($AppId)) {
+  #$AppId = ""
+  Write-Host "The Parameter -AppId cloud not be empty. "
+  Write-Host "SAFE QUIT" -ForegroundColor Green
+  exit
+}
+
+if ([string]::IsNullOrEmpty($cleanup)) {
+    $cleanup = $false;
+}
+
 
 $RequireRoles = (
   "Reader",
@@ -46,7 +68,7 @@ $RequireRoles = (
 
 # Add the Resouce name to here, all resouces start with following name will be ignore
 $SkipResouceNameList = (
-  "xxxx",
+  "subscriptionName1",
   "subscriptionName2"
 )
 
@@ -83,6 +105,17 @@ function WriteDebugLogFile {
   }
 }
 
+
+
+function ProcessRole ($appId,$subscription,$roleName) {
+    if ($cleanup -eq $true) {
+        RemoveRole $appId $subscription $roleName
+    }else{
+        AssignRole $appId $subscription $roleName    
+    }
+
+}
+
 function AssignRole ($appId,$subscription,$roleName) {
 
   $scope = "/subscriptions/" + $subscription.SubscriptionId
@@ -99,6 +132,25 @@ function AssignRole ($appId,$subscription,$roleName) {
   }
 
 }
+
+
+function RemoveRole ($appId,$subscription,$roleName) {
+
+  $scope = "/subscriptions/" + $subscription.SubscriptionId
+  Write-Host (" Remove Role '" + $roleName + "' for subscription: " + $subscription.Name)
+  WriteDebug (" Remove Role '" + $roleName + "' for subscription: " + $subscription.Name)
+  if ($ProductionRun -eq $true) {
+    try {
+      Remove-AzureRmRoleAssignment -ServicePrincipalName $appId -Scope $scope -RoleDefinitionName $roleName -ErrorAction Stop > $null
+    }
+    catch {
+      WriteDebug $_.Exception.Message
+      Write-Host ("Failed to remove role : " + $_.Exception.Message)
+    }
+  }
+
+}
+
 
 function isLog () {
   return $Log -ne $null -and $Log -eq $true
@@ -168,7 +220,7 @@ if ($IsValidate) {
 
 
   #GETTING A LIST OF SUBSCRIPTIONS
-  Write-Host "Getting the subscriptions, please wait..."
+  Write-Host "Getting the subscriptions List from Azure, please wait..." -ForegroundColor Yellow
 
   $Subscriptions = Get-AzureRmSubscription
 
@@ -207,7 +259,16 @@ if ($IsValidate) {
   #Press P to continue.
   if ($ProductionRun -eq $true) {
     Write-Host ""
-    Write-Host "Set ProductionRun to false just print log. "
+    Write-Host "Set `$ProductionRun to false just print log. "
+    Write-Host ""
+    Write-Host "Parm `$cleanup is " $cleanup
+    if ($cleanup -eq $False){
+        Write-Host " Assign Role starting. " -ForegroundColor Red
+    }else{
+        Write-Host " Remove Role starting. " -ForegroundColor Yellow
+    }
+    
+    Write-Host ""
     $x = Read-Host 'Press any key to exit or press P to continue.'
     if ($x.ToUpper() -ne "P") {
       Write-Host "SAFE QUIT" -ForegroundColor Green
@@ -224,9 +285,11 @@ if ($IsValidate) {
 
     Write-Host $i ". Process subscription  " $subscription.Name
     if (isNotSkip $subscription.Name) {
+    
       foreach ($roleName in $RequireRoles) {
-        AssignRole $AppId $subscription $roleName
+        ProcessRole $AppId $subscription $roleName
       }
+      
     }
     $i++
     Write-Host ""

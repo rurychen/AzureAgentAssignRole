@@ -3,29 +3,40 @@
     .
 .DESCRIPTION
     .
-.PARAMETER Mode
-    Please select a scanning mode, which can be either Full.
+.DESCRIPTION
+    .This AzureRM Script is used to Assign Role for App.
+    
+.PARAMETER AppId
+    The App ID. 
     
 .PARAMETER ProductionRun
     Default is $false, nothing will be changed. 
     Set to $True, will do assgin role.
+ 
+.PARAMETER cleanup
+    Default is $false, it means it will assign the role to App. 
+    Set to $True, it will clean up the role form the App.
+    
     
 .PARAMETER YesToAll
     Set to $true will skip all Confirm Box.
+
+.PARAMETER Mode
+    Please select a scanning mode, which can be either Full.
     
- .PARAMETER Login
+.PARAMETER Login
     Default is $false, open a login box to Azure. Change to $Ture, will use the current Login session.
     
-  .PARAMETER Log
+ .PARAMETER Log
     Set to $true  will genreate to log file for review.
     
 .EXAMPLE
-    C:\PS>.\AzureAgentAssignRole.ps1 -AppId "" -Mode Full -ProductionRun $false -Login $true -YesToAll $true -Log $true
+    C:\PS>.\AzureAgentAssignRole.ps1 -AppId "" -Mode Full -ProductionRun $false -Login $true -YesToAll $true -Log $true -cleanup $flase
     <Description of example>
 .NOTES
     Author:Rury Chen rurychen@gmail.com:
-    .\AzureAgentAssignRole.ps1 -AppId "" -Mode Full -ProductionRun $false -Login $true -Log $true -YesToAll $true
     Date: 2018-6-28
+    Last update: 2019-9-6
 #>
 [CmdletBinding(DefaultParameterSetName = "Mode")]
 param(
@@ -55,11 +66,16 @@ param(
   [Parameter(
     Mandatory = $false
   )]
+  $cleanup,
+  [Parameter(
+    Mandatory = $false
+  )]
   $Log,
   $AppId
 )
 
 Write-Host ""
+
 if ([string]::IsNullOrEmpty($AppId)) {
   #$AppId = ""
   Write-Host "The Parameter -AppId cloud not be empty. "
@@ -67,14 +83,21 @@ if ([string]::IsNullOrEmpty($AppId)) {
   exit
 }
 
+if ([string]::IsNullOrEmpty($cleanup)) {
+    $cleanup = $False;
+}
+
+Write-Host "Clean up is " $cleanup
+
+
 $RequireRoles = (
   "Reader",
   "Storage Account Key Operator Service Role"
 )
 
-# Add the Resouce name to here, all resouces start with following name will be ignore
+# Add the Subscription name to here, all resouces start with following name will be ignore
 $SkipResouceNameList = (
-  "xxxx",
+  "subscriptionName1",
   "subscriptionName2"
 )
 
@@ -111,6 +134,34 @@ function WriteDebugLogFile {
   }
 }
 
+
+
+function ProcessRole ($appId,$subscription,$roleName) {
+    if ($cleanup -eq $true) {
+        RemoveRole $appId $subscription $roleName
+    }else{
+        AssignRole $appId $subscription $roleName    
+    }
+
+}
+
+function RemoveRole ($appId,$subscription,$roleName) {
+
+  $scope = "/subscriptions/" + $subscription.SubscriptionId
+  Write-Host (" Remove Role '" + $roleName + "' for subscription: " + $subscription.Name)
+  WriteDebug (" Remove Role '" + $roleName + "' for subscription: " + $subscription.Name)
+  if ($ProductionRun -eq $true) {
+    try {
+      Remove-AzureRmRoleAssignment -ServicePrincipalName $appId -Scope $scope -RoleDefinitionName $roleName -ErrorAction Stop > $null
+    }
+    catch {
+      WriteDebug $_.Exception.Message
+      Write-Host ("Failed to remove role : " + $_.Exception.Message)
+    }
+  }
+
+}
+
 function AssignRole ($appId,$subscription,$roleName) {
 
   $scope = "/subscriptions/" + $subscription.SubscriptionId
@@ -127,6 +178,8 @@ function AssignRole ($appId,$subscription,$roleName) {
   }
 
 }
+
+
 
 function isLog () {
   return $Log -ne $null -and $Log -eq $true
@@ -185,7 +238,7 @@ WriteDebug ("Skip add role under following subscriptions. (Edit $SkipResouceName
 
 
 #GETTING A LIST OF SUBSCRIPTIONS
-Write-Host "Getting the subscriptions, please wait..."
+ Write-Host "Getting the subscriptions List from Azure, please wait..." -ForegroundColor Yellow
 
 $Subscriptions = Get-AzureRmSubscription
 
@@ -224,13 +277,22 @@ foreach ($entry in $selectedSubscriptions) { Write-Host " " + $entry.Name -Foreg
 #Press P to continue.
 if ($ProductionRun -eq $true) {
   Write-Host ""
-  Write-Host "Set ProductionRun to false just print log. "
-  $x = Read-Host 'Press any key to exit or press P to continue.'
-  if ($x.ToUpper() -ne "P") {
-    Write-Host "SAFE QUIT" -ForegroundColor Green
-    exit
-  }
-  #Clear-Host
+    Write-Host "Set `$ProductionRun to false just print log. "
+    Write-Host ""
+    Write-Host "Parm `$cleanup is " $cleanup
+    if ($cleanup -eq $False){
+        Write-Host " Assign Role starting. " -ForegroundColor Red
+    }else{
+        Write-Host " Remove Role starting. " -ForegroundColor Yellow
+    }
+    
+    Write-Host ""
+    $x = Read-Host 'Press any key to exit or press P to continue.'
+    if ($x.ToUpper() -ne "P") {
+      Write-Host "SAFE QUIT" -ForegroundColor Green
+      exit
+    }
+    #Clear-Host
 }
 
 Write-Host (" Appid Is ( " + $AppId + " )")
@@ -242,7 +304,7 @@ foreach ($subscription in $selectedSubscriptions) {
   Write-Host $i ". Process subscription  " $subscription.Name
   if (isNotSkip $subscription.Name) {
     foreach ($roleName in $RequireRoles) {
-      AssignRole $AppId $subscription $roleName
+      ProcessRole $AppId $subscription $roleName
     }
   }
   $i++
