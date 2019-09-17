@@ -1,4 +1,41 @@
-﻿param(
+﻿<#
+.SYNOPSIS
+    .
+.DESCRIPTION
+    .This AzureRM Script is used to enable VM Diagnostic for Linux and Windows VM with multithreading.
+
+.PARAMETER ProductionRun
+    Default is $false, nothing will be changed and just print the mockup result.
+    Set to $True, will do enable VM Diagnostic.
+
+.PARAMETER cleanup
+    Default is $false, it means it will enable VM Diagnostic.
+    Set to $True, it will clean up the VM Diagnostic.
+
+.PARAMETER subscriptionId
+    Specify the subscription ID. Default is empty and will process on all Subscriptions.
+
+.PARAMETER targetRsgName
+    Specify the Resource Group Name, it will process on the VMs which under this Resource Group Name. Default is empty and will process on VMs under the Subscriptions.
+
+.PARAMETER targetVmName
+    Specify the VM Name, it will process on the VMs which are the same VM Name. Default is empty and will process on VMs under the Subscriptions.
+
+.EXAMPLE
+   Upload the AzureAgentEnableVMDiagnostic.ps1 run it.
+        PS Azure:\> .\enable-vm-diagnostic.ps1 -cleanup $false -ProductionRun $false
+Note:
+- Just testing script by setting the parameter:  -ProductionRun $false
+- Clean up the VM diagnostic by setting parameter:   -cleanup $true
+- This script is running with multithreading. If there contains large number of VMs, please increase the parameter $ThreadCount from default value 20 to a suitable value.
+
+.NOTES
+    Author:Rury Chen rurychen@gmail.com
+    Create Date: 2019-09-15
+    Last update: 2019-09-17
+#>
+
+param(
 
     [Parameter(Mandatory=$False)]
     [string]
@@ -12,103 +49,176 @@
     [string]
     $targetVmName,
 
-    $cleanup
+    $cleanup,
+    $ProductionRun
+
 
 )
 
-$subscriptionId = "XXXXXX"
-$targetRsgName = "RuryTest"
+
+#$subscriptionId = "XXXXX"
+#$targetRsgName = "RuryTest"
 #$targetVmName = "rurytestlinux"
-$diagnosticStorageAccountName = "vmdiagnostic20190906"
+
+
+#$diagnosticStorageAccountName = "vmdiagnostic20190906"
+
+#Max length for the name of stroage account Prefix should less than 11 ( Azure limit the name lenth less than 24, we will create random name for the subfix)
+$storageNamePrefix = "autovmdiag"
+
 $storageType = "Standard_LRS"
-$storageNamePrefix = "autonamevmdiagnostic20190906"
 $deployExtensionLogDir = split-path -parent $MyInvocation.MyCommand.Definition
-$ProductionRun = $false
+#$ProductionRun = $true
+$ThreadCount = 20
+
+#$cleanup = @true
+
+
+#-------------script start !----------
+
+if ([string]::IsNullOrEmpty($ProductionRun)) {
+    $ProductionRun = $False;
+}
 
 if ([string]::IsNullOrEmpty($cleanup)) {
     $cleanup = $False;
 }
+
+if($ThreadCount -le 1)
+{
+    $ThreadCount = 1
+}
+
+if ([string]::IsNullOrEmpty($storageNamePrefix) -and $storageNamePrefix -gt 11) {
+    $storageNamePrefix = $storageNamePrefix.Substring(0,11)
+}
+
+
 Write-Host "Clean up is " $cleanup
 
-function Create-RandomStorageAccount($rsgName,$rsgLocation,$storageName){
-    Write-Host "Get-AzureRmStorageAccount -ResourceGroupName" $rsgName  "-AccountName" $storageName
-    $storageAccount = Get-AzureRmStorageAccount -ResourceGroupName $rsgName -AccountName $storageName
-    if($storageAccount){
-        Write-Host "Use the exist StorageAccount " $storageName
-        return $storageAccount
-    }else{
-        Write-Host "New-AzureRmStorageAccount -ResourceGroupName $rsgName -AccountName $storageName -Location $rsgLocation -Type $storageType"
-        $storageAccount = New-AzureRmStorageAccount -ResourceGroupName $rsgName -AccountName $storageName -Location $rsgLocation -Type $storageType
-        return $storageAccount
-    }
-}
 
-function Get-RandomStorageName(){
-    $randomResult = ""
-    for($i = 0;$i -lt 10;$i++){
-        $random = Get-Random -Maximum 9 -Minimum 0
-        $randomResult+=$random
-    }
-    $storageName = $storageNamePrefix+$randomResult
-    return $storageName
-}
-# if the extension has existed, just skip
-function Enable-LinuxDiagnosticsExtension($vm,$rsg,$rsgName,$rsgLocation,$vmId,$vmName){
-    $extensionType="LinuxDiagnostic"
-    $extensionName = "LinuxDiagnostic"
+function Enable-Diagnostics-multi-thread
+{
+    param(
+        $vmList
+    )
 
-    Write-Host "Get-AzureRmVM -Name $vmName -ResourceGroupName $rsgName"
-    $vm = Get-AzureRmVM -Name $vmName -ResourceGroupName $rsgName
-    $extension = $vm.Extensions | Where-Object -Property 'VirtualMachineExtensionType' -eq $extensionType
-    Write-Host " Extension " $vmName " state " $vm $extension.ProvisioningState
-    if( $extension -and $extension.ProvisioningState -eq 'Succeeded'){
-        if ($cleanup -eq $true) {
-            Write-Host "Remove-AzureRmVMExtension $rsgName -VMName $vmName -Name $extensionName -Force"
-            if ($ProductionRun -eq $true)
-            {
-                Remove-AzureRmVMExtension -ResourceGroupName $rsgName -VMName $vmName -Name $extensionName -Force
-                return "Remove Extension"
-            }
-            return "Mockup Remove"
-        }else{
-            Write-Host " just skip,due to diagnostics extension had been installed in VM: "$vmName " before,you can update the diagnostics settings via portal or powershell cmdlets by yourself."
-            return "Skip due to diagnostics extension had been installed"
+    #Write-Host "vmList is " $vmList.Count
+    #Write-Host "diagnosticStorageAccountName " $diagnosticStorageAccountName
+    #Write-Host "storageType =" $storageType
+    #Write-Host "storageNamePrefix =" $storageNamePrefix
+    #Write-Host "deployExtensionLogDir =" $deployExtensionLogDir
+    #Write-Host "ProductionRun =" $ProductionRun
+    #Write-Host "cleanup =" $cleanup
+
+    #$vmList = Get-AzureRmVM -ResourceGroupName "RuryTest"
+    #$vmList = Get-AzureRmVM
+
+    $throttleLimit = $ThreadCount
+    $SessionState = [system.management.automation.runspaces.initialsessionstate]::CreateDefault()
+    $Pool = [runspacefactory]::CreateRunspacePool(1, $throttleLimit, $SessionState, $Host)
+    $Pool.Open()
+
+
+    $ScriptBlock = {
+        param($vm,
+            $diagnosticStorageAccountName,
+            $storageType,
+            $storageNamePrefix,
+            $deployExtensionLogDir,
+            $ProductionRun ,
+            $cleanup
+        )
+
+
+        function Test-FUN
+        {
+            Write-Host "Test-FUN "
         }
 
-    }elseif ($cleanup -eq $true) {
-        Write-Host "Not need to clean up Extension for $rsgName -VMName $vmName -Name $extensionName"
-        return "No Extension need cleanup"
-    }
+        function Get-UniqueString ([string]$id, $length=13)
+        {
+            $hashArray = (new-object System.Security.Cryptography.SHA512Managed).ComputeHash($id.ToCharArray())
+            -join ($hashArray[1..$length] | ForEach-Object { [char]($_ % 26 + [byte][char]'a') })
+        }
 
-    Write-Host "start to install the diagnostics extension for linux VM" $vmName
+        function Create-RandomStorageAccount($rsgName,$rsgLocation,$storageName, $vmName){
+            Write-Host "#$vmName" "Get-AzureRmStorageAccount -ResourceGroupName" $rsgName  "-AccountName" $storageName
+            $storageAccount = Get-AzureRmStorageAccount -ResourceGroupName $rsgName -AccountName $storageName
+            if($storageAccount){
+                Write-Host "#$vmName" "Use the exist StorageAccount " $storageName
+                return $storageAccount
+            }else{
+                Write-Host "#$vmName" "New-AzureRmStorageAccount -ResourceGroupName $rsgName -AccountName $storageName -Location $rsgLocation -Type $storageType"
+                $storageAccount = New-AzureRmStorageAccount -ResourceGroupName $rsgName -AccountName $storageName -Location $rsgLocation -Type $storageType
+                return $storageAccount
+            }
+        }
 
-    $storageName = ""
-    $storageKey = ""
-    if($diagnosticStorageAccountName){
-        $storageName = $diagnosticStorageAccountName
-    }else{
-        $storageName  =Get-RandomStorageName
-    }
-    Write-Host "storageName:" $storageName
+        function Get-RandomStorageName{
+            param($id)
+            #$randomResult = ""
+            #for($i = 0;$i -lt 10;$i++){
+            #    $random = Get-Random -Maximum 9 -Minimum 0
+            #    $randomResult+=$random
+            #}
+            $randomResult = Get-UniqueString -id $id
+            $storageName = $storageNamePrefix+$randomResult
+            return $storageName
 
-    if ($ProductionRun -eq $true) {
-        $storageAccount = Create-RandomStorageAccount -storageName $storageName -rsgName $rsgName -rsgLocation $rsgLocation
-        $storageName = $storageAccount.StorageAccountName
-        $storageKeys = Get-AzureRmStorageAccountKey -ResourceGroupName $rsgName -Name $storageName;
-        $storageKey = $storageKeys[0].Value;
-    }else{
-        $storageKey = "mockup key for testing, set ProductionRun=true"
-    }
+        }
 
-    if ([string]::IsNullOrEmpty($storageKey)) {
-        Write-Host "Failed to install the diagnostics extension due to empty storageKey for StorageAccount  " $storageName -ForegroundColor red
-        return "Failed"
-    }
+        # if the extension has existed, just skip
+        function Enable-LinuxDiagnosticsExtension($vm,$rsg,$rsgName,$rsgLocation,$vmId,$vmName, $storageName ){
+            $extensionType="LinuxDiagnostic"
+            $extensionName = "LinuxDiagnostic"
 
-    #Write-Host "storageKey:" $storageKey
+            Write-Host "#$vmName" "Get-AzureRmVM -Name $vmName -ResourceGroupName $rsgName"
+            $vm = Get-AzureRmVM -Name $vmName -ResourceGroupName $rsgName
+            $extension = $vm.Extensions | Where-Object -Property 'VirtualMachineExtensionType' -eq $extensionType
+            Write-Host "#$vmName" " Extension state " $extension.ProvisioningState
+            if( $extension -and $extension.ProvisioningState -eq 'Succeeded'){
+                if ($cleanup -eq $true) {
+                    Write-Host "#$vmName" "Remove-AzureRmVMExtension $rsgName -VMName $vmName -Name $extensionName -Force"
+                    if ($ProductionRun -eq $true)
+                    {
+                        $Response = Remove-AzureRmVMExtension -ResourceGroupName $rsgName -VMName $vmName -Name $extensionName -Force
+                        return "Remove Extension Done - Linux. " + $Response.StatusCode
+                    }
+                    else
+                    {
+                        return "Mockup Remove"
+                    }
+                }else{
+                    Write-Host "#$vmName" " just skip,due to diagnostics extension had been installed in VM before,you can update the diagnostics settings via portal or powershell cmdlets by yourself."
+                    return "Skip due to diagnostics extension had been installed"
+                }
 
-    $vmLocation = $rsgLocation
-    $settingsString = '{
+            }elseif ($cleanup -eq $true) {
+                Write-Host "#$vmName" "Not need to clean up Extension for $rsgName -VMName $vmName -Name $extensionName"
+                return "No Extension need cleanup"
+            }
+
+            Write-Host "#$vmName" " use storageName:" $storageName
+            $storageKey = ""
+            if ($ProductionRun -eq $true) {
+                $storageAccount = Create-RandomStorageAccount -storageName $storageName -rsgName $rsgName -rsgLocation $rsgLocation -VMName $vmName
+                $storageName = $storageAccount.StorageAccountName
+                $storageKeys = Get-AzureRmStorageAccountKey -ResourceGroupName $rsgName -Name $storageName;
+                $storageKey = $storageKeys[0].Value;
+            }else{
+                $storageKey = "mockup key for testing, set ProductionRun=true"
+            }
+
+            if ([string]::IsNullOrEmpty($storageKey)) {
+                Write-Host "#$vmName" "Failed to install the diagnostics extension due to empty storageKey for StorageAccount  " $storageName -ForegroundColor red
+                return "Failed to install the diagnostics extension due to empty storageKey for StorageAccount or Account not found."
+            }
+
+            #Write-Host "#$vmName" "storageKey:" $storageKey
+
+            $vmLocation = $rsgLocation
+            $settingsString = '{
   "StorageAccount": "'+$storageName+'",
   "ladCfg": {
     "diagnosticMonitorConfiguration": {
@@ -859,79 +969,77 @@ function Enable-LinuxDiagnosticsExtension($vm,$rsg,$rsgName,$rsgLocation,$vmId,$
 }
 '
 
-    $settingsStringPath = Join-Path $deployExtensionLogDir "linuxsettings.json"
+            $settingsStringPath = Join-Path $deployExtensionLogDir "linuxsettings.json"
 
-    Out-File -FilePath $settingsStringPath -Force -Encoding utf8 -InputObject $settingsString
+            Out-File -FilePath $settingsStringPath -Force -Encoding utf8 -InputObject $settingsString
 
-    $extensionPublisher = 'Microsoft.Azure.Diagnostics'
-    $extensionVersion = "3.0"
-    $protectedSettings  = '{
+            $extensionPublisher = 'Microsoft.Azure.Diagnostics'
+            $extensionVersion = "3.0"
+            $protectedSettings  = '{
     "storageAccountName": "'+$storageName+'",
     "storageAccountKey": "'+$storageKey+'"
 }'
-    $extensionType = "LinuxDiagnostic"
+            $extensionType = "LinuxDiagnostic"
 
-    Write-Host "Set-AzureRmVMExtension $rsgName -VMName $vmName -Name $extensionName"
-    if ($ProductionRun -eq $true) {
-        $result = Set-AzureRmVMExtension -ResourceGroupName $rsgName -VMName $vmName -Name $extensionName -Publisher $extensionPublisher -ExtensionType $extensionType -TypeHandlerVersion $extensionVersion -Settingstring $settingsString -ProtectedSettingString $protectedSettings -Location $vmLocation
-        return $result.StatusCode
-    }
-
-    return "Mockup Done"
-
-}
-
-
-function Enable-WindowsDiagnosticsExtension($vm, $rsg, $rsgName, $rsgLocation,$vmId,$vmName){
-    $extensionName = "IaaSDiagnostics"
-    $extensionType = "IaaSDiagnostics"
-
-    $extension = Get-AzureRmVMDiagnosticsExtension -ResourceGroupName $rsgName -VMName $vmName | Where-Object -Property ExtensionType -eq $extensionType
-    if($extension -and $extension.ProvisioningState -eq 'Succeeded'){
-        if ($cleanup -eq $true) {
-            Write-Host "Remove-AzureRmVMExtension $rsgName -VMName $vmName -Name $extensionName -Force"
-            if ($ProductionRun -eq $true)
-            {
-                Remove-AzureRmVMExtension -ResourceGroupName $rsgName -VMName $vmName -Name $extensionName  -Force
+            Write-Host "#$vmName" "Set-AzureRmVMExtension $rsgName -VMName $vmName -Name $extensionName -AsJob" -ForegroundColor Yellow
+            if ($ProductionRun -eq $true) {
+                $result = Set-AzureRmVMExtension -ResourceGroupName $rsgName -VMName $vmName -Name $extensionName -Publisher $extensionPublisher -ExtensionType $extensionType -TypeHandlerVersion $extensionVersion -Settingstring $settingsString -ProtectedSettingString $protectedSettings -Location $vmLocation -AsJob
+                return $result.StatusCode
             }
-            return "Mockup remove."
-        }else{
-            Write-Host "just skip,due to diagnostics extension had been installed in VM: "$vmName " before,you can update the diagnostics settings via portal or powershell cmdlets by yourself"
-            return  "Skip due to diagnostics extension had been installed "
+
+            return "Mockup Done"
+
         }
-    }elseif ($cleanup -eq $true) {
-        Write-Host "Not need to clean up Extension for $rsgName -VMName $vmName -Name $extensionName"
-        return "Skip due to Not need to clean up Extension"
-    }
 
-    Write-Host "start to install the diagnostics extension for windows VM"
 
-    $storageName = ""
-    $storageKey = ""
-    if($diagnosticStorageAccountName){
-        $storageName = $diagnosticStorageAccountName
-    }else{
-        $storageName  = Get-RandomStorageName
-    }
-    Write-Host "storageName:" $storageName
-    if ($ProductionRun -eq $true) {
-        $storageAccount = Create-RandomStorageAccount -storageName $storageName -rsgName $rsgName -rsgLocation $rsgLocation
-        $storageKeys = Get-AzureRmStorageAccountKey -ResourceGroupName $rsgName -Name $storageName;
-        $storageKey = $storageKeys[0].Value;
-    }else{
-        $storageKey = "mockup key for ProductionRun=false"
-    }
+        function Enable-WindowsDiagnosticsExtension($vm, $rsg, $rsgName, $rsgLocation,$vmId,$vmName,$storageName){
+            $extensionName = "Microsoft.Insights.VMDiagnosticsSettings"
+            $extensionType = "IaaSDiagnostics"
+            Write-Host "#$vmName Get-AzureRmVMDiagnosticsExtension -ResourceGroupName $rsgName -VMName $vmName | Where-Object -Property ExtensionType -eq $extensionType"
+            $extension = Get-AzureRmVMDiagnosticsExtension -ResourceGroupName $rsgName -VMName $vmName | Where-Object -Property ExtensionType -eq $extensionType
+            Write-Host "#$vmName" " Extension state " $extension.ProvisioningState
+            if($extension -and $extension.ProvisioningState -eq 'Succeeded'){
+                if ($cleanup -eq $true) {
+                    Write-Host "#$vmName" "Remove-AzureRmVMExtension $rsgName -VMName $vmName -Name " $extension.Name " -Force"
+                    if ($ProductionRun -eq $true)
+                    {
+                        $Response = Remove-AzureRmVMExtension -ResourceGroupName $rsgName -VMName $vmName -Name $extension.Name  -Force
+                        return "Remove Extension Done - Windows." + $Response.StatusCode
+                    }else{
+                        return "Mockup remove."
+                    }
 
-    if ([string]::IsNullOrEmpty($storageKey)) {
-        Write-Host "Failed to install the diagnostics extension due to empty storageKey for StorageAccount  " $storageName -ForegroundColor red
-        return "Failed to install the diagnostics extension due to empty storageKey for StorageAccount " +$storageName
-    }
+                }else{
+                    Write-Host "#$vmName" "just skip,due to diagnostics extension had been installed in VM before,you can update the diagnostics settings via portal or powershell cmdlets by yourself"
+                    return  "Skip due to diagnostics extension had been installed "
+                }
+            }elseif ($cleanup -eq $true) {
+                Write-Host "#$vmName" "Not need to clean up Extension for $rsgName -VMName $vmName -Name $extensionName"
+                return "No Extension need cleanup"
+            }
 
-    #Write-Host "storageKey:" $storageKey
+            Write-Host "#$vmName" "start to install the diagnostics extension for windows VM"
 
-    $vmLocation = $rsgLocation
+            $storageKey = ""
+            Write-Host "#$vmName" "use storageName:" $storageName
+            if ($ProductionRun -eq $true) {
+                $storageAccount = Create-RandomStorageAccount -storageName $storageName -rsgName $rsgName -rsgLocation $rsgLocation  -VMName $vmName
+                $storageKeys = Get-AzureRmStorageAccountKey -ResourceGroupName $rsgName -Name $storageName;
+                $storageKey = $storageKeys[0].Value;
+            }else{
+                $storageKey = "mockup key for ProductionRun=false"
+            }
 
-    $extensionTemplate = '{
+            if ([string]::IsNullOrEmpty($storageKey)) {
+                Write-Host "#$vmName" "Failed to install the diagnostics extension due to empty storageKey for StorageAccount  " $storageName -ForegroundColor red
+                return "Failed to install the diagnostics extension due to empty storageKey for StorageAccount or StorageAccount not found. " +$storageName
+            }
+
+            #Write-Host "#$vmName" "storageKey:" $storageKey
+
+            $vmLocation = $rsgLocation
+
+            $extensionTemplate = '{
     "$schema": "http://schema.management.azure.com/schemas/2015-01-01/deploymentTemplate.json#",
     "contentVersion": "1.0.0.0",
     "parameters": {},
@@ -1231,50 +1339,141 @@ function Enable-WindowsDiagnosticsExtension($vm, $rsg, $rsgName, $rsgLocation,$v
         }
     ]
 }'
-    $extensionTemplatePath = Join-Path $deployExtensionLogDir "extensionTemplateForWindows.json";
-    Out-File -FilePath $extensionTemplatePath -Force -Encoding utf8 -InputObject $extensionTemplate
-    Write-Host "New-AzureRmResourceGroupDeployment " $rsgName  $extensionTemplatePath
+            $fileName = "windowsvm_extension_$rsgName_$vmName.json"
+            $extensionTemplatePath = Join-Path $deployExtensionLogDir $fileName;
+            #Out-File -FilePath $extensionTemplatePath -Force -Encoding utf8 -InputObject $extensionTemplate
+            Set-Content -Path $extensionTemplatePath -Value $extensionTemplate -Encoding utf8
+            Write-Host "#$vmName New-AzureRmResourceGroupDeployment  $rsgName  $extensionTemplatePath -AsJob " -ForegroundColor Yellow
+            if ($ProductionRun -eq $true) {
+                $result = New-AzureRmResourceGroupDeployment -ResourceGroupName $rsgName -TemplateFile $extensionTemplatePath -AsJob
+                return "Done - Status Code = " + $result.StatusCode
+            }
 
-    if ($ProductionRun -eq $true) {
-        $result = New-AzureRmResourceGroupDeployment -ResourceGroupName $rsgName -TemplateFile $extensionTemplatePath
-        return $result.StatusCode
+            Remove-Item  -Path  $extensionTemplatePath -Force
+            return "Mockup Done."
+        }
+
+        function Enable-VMDiagnosticsExtension($vm)
+        {
+
+            $vmName = $vm.Name
+            Write-Host "#$vmName - Process Enable-VMDiagnosticsExtension"
+
+            $status=$vm | Get-AzureRmVM -Status
+            if ($status.Statuses[1].DisplayStatus -ne "VM running")
+            {
+                Write-Host "#"$vm.Name " is not running. Skip."
+                return "Skip due to VM Not running."
+            }
+            $rsgName = $vm.ResourceGroupName;
+            $rsg = Get-AzureRmResourceGroup -Name $rsgName
+            $rsgLocation = $vm.Location;
+
+            $vmId = $vm.Id
+
+            Write-Host "#$vmName - vmId:" $vmId
+
+            $osType = $vm.StorageProfile.OsDisk.OsType
+            Write-Host "#$vmName" "  OsType:" $osType
+
+            # Start to check the RSG name
+            $storageName = ""
+            $storageKey = ""
+            if($diagnosticStorageAccountName){
+                $storageName = $diagnosticStorageAccountName
+            }else{
+                $storageName  =Get-RandomStorageName -id $rsg.ResourceId
+            }
+
+            $result = "VM " + $vmName + " , result: "
+            if($osType -eq 0){
+                Write-Host "#$vmName" "  This vm type is windows"
+                $result += Enable-WindowsDiagnosticsExtension -vm $vm -rsg $rsg -rsgName $rsgName -rsgLocation $rsgLocation -vmId $vmId -vmName $vmName -storageName $storageName
+            } else {
+                Write-Host "#$vmName" "  This vm type is linux"
+                $result += Enable-LinuxDiagnosticsExtension  -vm $vm -rsg $rsg  -rsgName $rsgName -rsgLocation $rsgLocation -vmId $vmId -vmName $vmName -storageName $storageName
+            }
+            return $result
+
+        }
+        Write-Host ""
+
+
+        $id = $vm.Name
+
+        Write-Host "#$id - " "diagnosticStorageAccountName = " $diagnosticStorageAccountName
+        Write-Host "#$id - " "storageType = " $storageType
+        Write-Host "#$id - " "storageNamePrefix = " $storageNamePrefix
+        Write-Host "#$id - " "deployExtensionLogDir = " $deployExtensionLogDir
+        Write-Host "#$id - " "ProductionRun = " $ProductionRun
+        Write-Host "#$id - " "cleanup = " $cleanup
+        Write-Host ""
+
+        Write-Host "#$id Starting processing"
+
+        $result = Enable-VMDiagnosticsExtension $vm
+
+        #Test-FUN
+
+        $DateTime =  Date
+        $logStr = "#$id - " + $DateTime + " " + " Job Finished -- " + $result
+        Write-Host  $logStr  -ForegroundColor Yellow
+        Write-Host ""
+
     }
-    return "Mockup Done."
-}
 
+    $threads = @()
 
-function Enable-VMDiagnosticsExtension($index, $vm)
-{
+    $handles = for ($i = 0; $i -lt $vmList.Count; $i++) {
+        $vm = $vmList[$i]
+        Write-Host  "Create Job" $vm.Name  -ForegroundColor red
+        # $powershell = [powershell]::Create().AddScript($ScriptBlock).AddArgument($vm)
 
-    Write-Host "Process " $vm.Name " job index: " $index
+        $powershell = [powershell]::Create().AddScript($ScriptBlock).AddArgument($vm).AddArgument($diagnosticStorageAccountName).AddArgument($storageType).AddArgument($storageNamePrefix).AddArgument($deployExtensionLogDir).AddArgument($ProductionRun).AddArgument($cleanup)
 
-    $status=$vm | Get-AzureRmVM -Status
-    if ($status.Statuses[1].DisplayStatus -ne "VM running")
-    {
-        Write-Host $vm.Name" is not running. Skip."
-        return "Skip due to VM Not running."
+        $powershell.RunspacePool = $Pool
+        $powershell.BeginInvoke()
+        $threads += $powershell
     }
-    $rsgName = $vm.ResourceGroupName;
-    $rsg = Get-AzureRmResourceGroup -Name $rsgName
-    $rsgLocation = $vm.Location;
 
-    $vmId = $vm.Id
-    $vmName = $vm.Name
-    Write-Host "  vmId:" $vmId
-    Write-Host "  vmName:" $vmName
+    $logfile = ".\log.txt"
+    $totalCount = $handles.Count
+    do {
+        $i = 0
+        $done = $true
+        $doneCount =0
+        $doingCount =0
+        foreach ($handle in $handles) {
+            if ($handle -ne $null) {
+                if ($handle.IsCompleted) {
+                    $threads[$i].EndInvoke($handle)
+                    $threads[$i].Dispose()
+                    if ($totalCount -gt 1)
+                    {
+                        $handles[$i] = $null
+                    }
+                } else {
+                    $done = $false
+                    $doingCount++
+                }
+            }
 
-    $osType = $vm.StorageProfile.OsDisk.OsType
-    Write-Host "  OsType:" $osType
+            $i++
+        }
 
-    $result = "VM " + $vmName + " , result: "
-    if($osType -eq 0){
-        Write-Host "  This vm type is windows"
-        $result += Enable-WindowsDiagnosticsExtension -vm $vm -rsg $rsg -rsgName $rsgName -rsgLocation $rsgLocation -vmId $vmId -vmName $vmName
-    } else {
-        Write-Host "  This vm type is linux"
-        $result += Enable-LinuxDiagnosticsExtension  -vm $vm -rsg $rsg  -rsgName $rsgName -rsgLocation $rsgLocation -vmId $vmId -vmName $vmName
-    }
-    return $result
+        $doneCount = $totalCount - $doingCount
+        $logStr = "Total Job Count = $totalCount . job finished  $doneCount , job doing  $doingCount "
+        Write-Host  $logStr  -ForegroundColor Yellow
+        # Add-Content  -Path $logfile  -Value  $logStr
+
+        if (-not $done) {
+            Start-Sleep -Milliseconds 5000
+        }
+
+    } until ($done)
+
+    $Pool.Dispose()
+    [System.GC]::Collect()
 
 }
 
@@ -1304,13 +1503,18 @@ function Process-Subscription($Subscription){
     if($vmList){
         Write-Host "vms count: " $vmList.Count
         Write-Host ""
-        $i = 0
-        foreach($vm in $vmList){
-            $i++
-            $resultStr = Enable-VMDiagnosticsExtension -index $i -vm $vm
-            Write-Host $resultStr -ForegroundColor Yellow
-            Write-Host ""
-        }
+        # if($ThreadCount -le 1){
+        #     $i = 0
+        #     foreach($vm in $vmList){
+        #         $i++
+        #         $resultStr = Enable-VMDiagnosticsExtension -index $i -vm $vm
+        #         Write-Host $resultStr -ForegroundColor Yellow
+        #         Write-Host ""
+        #     }
+        # }
+
+        Enable-Diagnostics-multi-thread -vmList $vmList  -diagnosticStorageAccountName $diagnosticStorageAccountName  -storageType $storageType -storageNamePrefix $storageNamePrefix -deployExtensionLogDir $deployExtensionLogDir -ProductionRun $ProductionRun -cleanup $cleanup
+
     } else {
         Write-Host "no vms exist"
     }
@@ -1321,8 +1525,15 @@ Write-Host "This script is using for Foglight Azure Agent Enable VM diagnostic i
 Write-Host ""
 Write-Host "Getting the subscriptions List from Azure, please wait..." -ForegroundColor Yellow
 $Subscriptions = Get-AzureRmSubscription
+
+if($Subscriptions -eq $null){
+    Write-Host "Login-AzureRmAccount"
+    Login-AzureRmAccount -ErrorAction Stop
+}
+
 Write-Host "All Subscriptions:" -ForegroundColor Yellow
 foreach ($entry in $Subscriptions) { Write-Host " " + $entry.Name -ForegroundColor Yellow }
+
 Write-Host "------------------------------------------------------"
 
 Write-Host ""
